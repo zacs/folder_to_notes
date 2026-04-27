@@ -5,8 +5,8 @@
 set -euo pipefail
 
 # ── Configuration ────────────────────────────────────────────────────────────
-DROPBOX_FOLDER="${HOME}/Dropbox/Scanner"
-NOTES_FOLDER="Scanned Documents"       # Folder name inside Apple Notes / iCloud
+DROPBOX_FOLDER="/Users/zac/Dropbox/Scanner"
+NOTES_FOLDER="Inbox"       # Folder name inside Apple Notes / iCloud
 
 BASE_DIR="${HOME}/scanner-to-notes"
 BIN="${BASE_DIR}/bin/process_scan"
