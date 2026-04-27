@@ -5,16 +5,15 @@ import Vision
 import FoundationModels
 
 // MARK: - Structured output
+//
+// NOTE: We intentionally avoid the @Generable / @Guide macros here, because
+// their implementation (the FoundationModelsMacros plugin) ships only with
+// full Xcode — not with the Command Line Tools. Instead we ask the model for
+// JSON and decode it ourselves.
 
-@Generable
-struct DocumentAnalysis {
-    @Guide(description: "A concise, descriptive title for this document in 5–10 words. Use the content — not the filename — to infer the best title.")
+struct DocumentAnalysis: Codable {
     var title: String
-
-    @Guide(description: "2–3 sentences summarizing the document's key content, purpose, and any important details like dates, names, or amounts.")
     var summary: String
-
-    @Guide(description: "5–8 relevant keywords or topic tags as short strings, useful for later search and retrieval.")
     var keywords: [String]
 }
 
@@ -86,10 +85,10 @@ func extractText(from pdfURL: URL) throws -> String {
 // MARK: - AI analysis
 
 func analyzeDocument(text: String, filename: String) async throws -> DocumentAnalysis {
-    let availability = LanguageModelSession.Availability()
-    guard case .available = availability else {
+    let model = SystemLanguageModel.default
+    guard model.availability == .available else {
         throw NSError(domain: "ScanProcessor", code: 2,
-                      userInfo: [NSLocalizedDescriptionKey: "Foundation Models unavailable. Is Apple Intelligence enabled in System Settings?"])
+                      userInfo: [NSLocalizedDescriptionKey: "Foundation Models unavailable (\(model.availability)). Is Apple Intelligence enabled in System Settings?"])
     }
 
     let session = LanguageModelSession {
@@ -98,6 +97,14 @@ func analyzeDocument(text: String, filename: String) async throws -> DocumentAna
         Given OCR-extracted text from a scanned document, produce a clear title, \
         a concise summary, and relevant keywords. \
         Focus on actual content. If OCR quality is poor, do your best with available text.
+
+        Always respond with a single JSON object — no prose, no code fences — \
+        matching exactly this schema:
+        {
+          "title": String,        // 5–10 word descriptive title inferred from content (not filename)
+          "summary": String,      // 2–3 sentences summarizing key content, purpose, dates, names, amounts
+          "keywords": [String]    // 5–8 short keyword/topic tags
+        }
         """
     }
 
@@ -111,10 +118,31 @@ func analyzeDocument(text: String, filename: String) async throws -> DocumentAna
 
     Extracted text:
     \(excerpt)
+
+    Respond with the JSON object only.
     """
 
-    let response = try await session.respond(to: prompt, generating: DocumentAnalysis.self)
-    return response.content
+    let response = try await session.respond(to: prompt)
+    let raw = response.content
+
+    // Strip optional code fences and isolate the JSON object.
+    var jsonString = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let start = jsonString.firstIndex(of: "{"),
+       let end = jsonString.lastIndex(of: "}") {
+        jsonString = String(jsonString[start...end])
+    }
+
+    guard let data = jsonString.data(using: .utf8) else {
+        throw NSError(domain: "ScanProcessor", code: 3,
+                      userInfo: [NSLocalizedDescriptionKey: "Could not encode model response as UTF-8."])
+    }
+
+    do {
+        return try JSONDecoder().decode(DocumentAnalysis.self, from: data)
+    } catch {
+        throw NSError(domain: "ScanProcessor", code: 4,
+                      userInfo: [NSLocalizedDescriptionKey: "Could not decode model JSON: \(error.localizedDescription). Raw output: \(raw)"])
+    }
 }
 
 // MARK: - Output

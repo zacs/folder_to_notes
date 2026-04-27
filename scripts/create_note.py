@@ -19,7 +19,7 @@ import sys
 def build_note_body(summary: str, keywords: str, filename: str) -> str:
     """Build an HTML body for the note — Notes renders basic HTML."""
     return (
-        f"<b>Summary</b><br>{summary}"
+        f"<br><b>Summary</b><br>{summary}"
         f"<br><br><b>Keywords</b><br>{keywords}"
         f"<br><br><b>Source file</b><br>{filename}"
     )
@@ -52,7 +52,7 @@ tell application "Notes"
         tell targetFolder
             set newNote to make new note with properties {{name:"{t}", body:"{b}"}}
             tell newNote
-                make new attachment with properties {{file:POSIX file "{p}"}}
+                make new attachment with data (POSIX file "{p}")
             end tell
         end tell
     end tell

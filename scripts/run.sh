@@ -4,11 +4,24 @@
 
 set -euo pipefail
 
+# ── Single-instance guard ────────────────────────────────────────────────────
+# launchd can fire WatchPaths events twice in rapid succession for a single
+# file change. Without this, two concurrent runs both pass the processed.txt
+# check and we create duplicate notes / attachments.
+LOCK_FILE="/tmp/scanner-to-notes.lock"
+exec 9>"$LOCK_FILE"
+if ! /usr/bin/flock -n 9; then
+    # Another instance is already handling this batch — exit silently.
+    exit 0
+fi
+
 # ── Configuration ────────────────────────────────────────────────────────────
 DROPBOX_FOLDER="/Users/zac/Dropbox/Scanner"
 NOTES_FOLDER="Inbox"       # Folder name inside Apple Notes / iCloud
 
-BASE_DIR="${HOME}/scanner-to-notes"
+# Resolve BASE_DIR to the repo root (parent of this scripts/ folder),
+# regardless of where the project is installed.
+BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="${BASE_DIR}/bin/process_scan"
 CREATE_NOTE="${BASE_DIR}/scripts/create_note.py"
 PROCESSED_FILE="${BASE_DIR}/state/processed.txt"
