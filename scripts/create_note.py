@@ -36,6 +36,11 @@ def create_note(title: str, body: str, pdf_path: str, folder: str) -> bool:
     f = applescript_escape(folder)
     p = applescript_escape(pdf_path)
 
+    # Note: Apple Notes' AppleScript attachment API has a long-standing bug
+    # where attachments are sometimes registered twice (visible as duplicate
+    # PDF chips in the note). The JXA equivalent silently produces zero
+    # attachments. Sticking with AppleScript — duplicates are easy to delete
+    # manually and at least the file is reliably present.
     script = f'''
 tell application "Notes"
     set targetFolder to missing value

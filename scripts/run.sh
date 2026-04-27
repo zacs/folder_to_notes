@@ -8,12 +8,13 @@ set -euo pipefail
 # launchd can fire WatchPaths events twice in rapid succession for a single
 # file change. Without this, two concurrent runs both pass the processed.txt
 # check and we create duplicate notes / attachments.
-LOCK_FILE="/tmp/scanner-to-notes.lock"
-exec 9>"$LOCK_FILE"
-if ! /usr/bin/flock -n 9; then
+# (macOS doesn't ship flock(1), so we use an atomic mkdir as a lock.)
+LOCK_DIR="/tmp/scanner-to-notes.lock"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     # Another instance is already handling this batch — exit silently.
     exit 0
 fi
+trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
 
 # ── Configuration ────────────────────────────────────────────────────────────
 DROPBOX_FOLDER="/Users/zac/Dropbox/Scanner"
@@ -29,7 +30,10 @@ LOG="${BASE_DIR}/logs/scanner.log"
 # ─────────────────────────────────────────────────────────────────────────────
 
 log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG"
+    # Write only to the log file. launchd already redirects stdout/stderr to
+    # scanner.log / scanner-error.log via the plist, so tee'ing here would
+    # cause every line to appear twice.
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG"
 }
 
 die() {
