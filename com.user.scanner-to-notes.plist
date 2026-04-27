@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+
+    <key>Label</key>
+    <string>com.user.scanner-to-notes</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>INSTALL_DIR/scripts/run.sh</string>
+    </array>
+
+    <!-- Fire whenever files appear/change in the scanner folder -->
+    <key>WatchPaths</key>
+    <array>
+        <string>DROPBOX_SCANNER_PATH</string>
+    </array>
+
+    <!-- Don't run immediately on load, only on folder changes -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>INSTALL_DIR/logs/scanner.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>INSTALL_DIR/logs/scanner-error.log</string>
+
+</dict>
+</plist>
