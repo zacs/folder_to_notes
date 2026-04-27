@@ -22,9 +22,20 @@ an Apple Note with title, summary, keywords, and the original PDF attached.
 
 ## Install
 
+One-liner (recommended):
+
 ```bash
-git clone <this-repo> ~/scanner-to-notes
-cd ~/scanner-to-notes
+curl -fsSL https://raw.githubusercontent.com/zacs/folder_to_notes/main/bootstrap.sh | bash
+```
+
+This clones the repo into `~/.folder-to-notes` and runs the installer. Re-running
+the same command later updates to the latest version.
+
+Or manually:
+
+```bash
+git clone https://github.com/zacs/folder_to_notes.git ~/.folder-to-notes
+cd ~/.folder-to-notes
 bash install.sh
 ```
 
