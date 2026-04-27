@@ -12,10 +12,19 @@ echo ""
 echo "=== scanner-to-notes installer ==="
 echo ""
 
-read -rp "Dropbox scanner folder path [${HOME}/Dropbox/Scanner]: " DROPBOX_PATH
+# When invoked via `curl ... | bash`, stdin is the pipe from curl, not the
+# user's terminal — so plain `read` gets EOF and prompts are skipped. Read
+# from /dev/tty when available so the prompts work in both modes.
+if [[ -r /dev/tty ]]; then
+    PROMPT_IN=/dev/tty
+else
+    PROMPT_IN=/dev/stdin
+fi
+
+read -rp "Dropbox scanner folder path [${HOME}/Dropbox/Scanner]: " DROPBOX_PATH < "$PROMPT_IN"
 DROPBOX_PATH="${DROPBOX_PATH:-${HOME}/Dropbox/Scanner}"
 
-read -rp "Apple Notes folder name [Scanned Documents]: " NOTES_FOLDER
+read -rp "Apple Notes folder name [Scanned Documents]: " NOTES_FOLDER < "$PROMPT_IN"
 NOTES_FOLDER="${NOTES_FOLDER:-Scanned Documents}"
 
 echo ""
