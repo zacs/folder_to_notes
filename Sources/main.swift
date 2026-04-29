@@ -83,7 +83,17 @@ func recognizeText(
     // Recognize English + Japanese. Vision auto-detects which to use per
     // observation. Adding Japanese is essentially free for English-only
     // documents but enables OCR on Japanese scans.
-    request.recognitionLanguages = ["en-US", "ja"]
+    //
+    // IMPORTANT: Japanese (and other CJK) recognition requires a recent
+    // request revision. Pin to the latest revision the runtime supports
+    // for this request type so CLT-based builds don't silently fall back
+    // to an older Latin-only revision.
+    let supported = VNRecognizeTextRequest.supportedRevisions
+    if let latest = supported.max() {
+        request.revision = latest
+    }
+    request.recognitionLanguages = ["en-US", "ja-JP"]
+    request.automaticallyDetectsLanguage = true
 
     let handler = VNImageRequestHandler(cgImage: cgImage, orientation: orientation, options: [:])
     try handler.perform([request])
@@ -365,6 +375,7 @@ func detectLanguage(_ text: String) -> String? {
         }
     }
     let cjkRatio = letterCount > 0 ? Double(cjkCount) / Double(letterCount) : 0
+    fputs("  language detect: \(letterCount) letters, \(cjkCount) CJK (\(String(format: "%.0f%%", cjkRatio * 100)))\n", stderr)
     if cjkCount >= 40 && cjkRatio >= 0.15 {
         // Distinguish ja vs zh vs ko by which range dominates.
         var ja = 0, zh = 0, ko = 0
@@ -397,6 +408,9 @@ func detectLanguage(_ text: String) -> String? {
 
     let hypotheses = recognizer.languageHypotheses(withMaximum: 3)
     guard let dominant = recognizer.dominantLanguage else { return nil }
+
+    let hypString = hypotheses.map { "\($0.key.rawValue)=\(String(format: "%.2f", $0.value))" }.joined(separator: ", ")
+    fputs("  language detect: dominant=\(dominant.rawValue) hypotheses=[\(hypString)]\n", stderr)
 
     // If English is even a plausible candidate, treat as English.
     let englishScore = hypotheses[.english] ?? 0
