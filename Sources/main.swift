@@ -329,13 +329,84 @@ func fallbackAnalysis(text: String, filename: String, reason: String) -> Documen
 // MARK: - Translation
 
 /// Detect the dominant language of the OCR'd text. Returns a BCP-47
-/// language code (e.g., "en", "ja", "de") or nil if undetermined.
+/// language code (e.g., "en", "ja", "de") or nil if the text is English
+/// or detection isn't confident enough to act on.
+///
+/// NLLanguageRecognizer is trained on clean prose and gets fooled by
+/// noisy OCR — short snippets, mixed-language headers, and stray symbols
+/// will often produce a confident-looking-but-wrong guess (e.g. Italian
+/// or Catalan for English-with-some-Japanese-headers documents). We
+/// counter that with three guardrails:
+///   1. Strip non-letter noise so we score on real words.
+///   2. Constrain hints to a realistic candidate set — heavy English
+///      prior plus the major non-Latin scripts we actually care about.
+///   3. Require high confidence for a non-English verdict, and require
+///      English to be a distant runner-up. Otherwise: treat as English.
 func detectLanguage(_ text: String) -> String? {
-    let sample = String(text.prefix(2000))
+    // Use a generous sample so short docs still get a stable signal.
+    let sample = String(text.prefix(4000))
+
+    // Heuristic shortcut: if the sample contains a meaningful amount of
+    // CJK / Hangul characters, trust the script over the recognizer.
+    // Catches mixed docs like "mostly English with a Japanese header"
+    // where we DON'T want to translate, and pure-Japanese docs where
+    // we DO. Threshold: at least 40 CJK chars AND >= 15% of total letters.
+    let scalars = sample.unicodeScalars
+    var cjkCount = 0
+    var letterCount = 0
+    for s in scalars {
+        if s.properties.isAlphabetic { letterCount += 1 }
+        let v = s.value
+        // CJK Unified Ideographs, Hiragana, Katakana, Hangul Syllables
+        if (0x3040...0x30FF).contains(v) ||      // Hiragana + Katakana
+           (0x4E00...0x9FFF).contains(v) ||      // CJK Unified
+           (0xAC00...0xD7AF).contains(v) {       // Hangul
+            cjkCount += 1
+        }
+    }
+    let cjkRatio = letterCount > 0 ? Double(cjkCount) / Double(letterCount) : 0
+    if cjkCount >= 40 && cjkRatio >= 0.15 {
+        // Distinguish ja vs zh vs ko by which range dominates.
+        var ja = 0, zh = 0, ko = 0
+        for s in scalars {
+            let v = s.value
+            if (0x3040...0x30FF).contains(v) { ja += 1 }
+            else if (0x4E00...0x9FFF).contains(v) { zh += 1 } // could be either
+            else if (0xAC00...0xD7AF).contains(v) { ko += 1 }
+        }
+        if ko > ja && ko > zh { return "ko" }
+        if ja > 0 { return "ja" }     // any kana -> Japanese
+        if zh > 0 { return "zh" }
+        return "ja"
+    }
+
     let recognizer = NLLanguageRecognizer()
+    // Bias heavily toward English; only consider a small set of
+    // languages we'd plausibly see and want to translate.
+    recognizer.languageHints = [
+        .english:    0.7,
+        .japanese:   0.1,
+        .simplifiedChinese: 0.05,
+        .korean:     0.05,
+        .german:     0.025,
+        .french:     0.025,
+        .spanish:    0.025,
+        .portuguese: 0.025,
+    ]
     recognizer.processString(sample)
-    guard let lang = recognizer.dominantLanguage else { return nil }
-    return lang.rawValue
+
+    let hypotheses = recognizer.languageHypotheses(withMaximum: 3)
+    guard let dominant = recognizer.dominantLanguage else { return nil }
+
+    // If English is even a plausible candidate, treat as English.
+    let englishScore = hypotheses[.english] ?? 0
+    if dominant == .english || englishScore >= 0.25 { return nil }
+
+    // Require strong confidence for a non-English verdict.
+    let topScore = hypotheses[dominant] ?? 0
+    guard topScore >= 0.85 else { return nil }
+
+    return dominant.rawValue
 }
 
 /// Translate non-English OCR text to English using Foundation Models.

@@ -72,7 +72,7 @@ Dropbox folder (local sync)
 ## File structure
 
 ```
-folder-to-notes/
+~/.folder-to-notes/
 ├── install.sh              ← run once to set up
 ├── Sources/
 │   └── main.swift          ← Swift OCR + AI tool
