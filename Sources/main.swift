@@ -49,6 +49,66 @@ func renderPage(_ page: PDFPage, scale: CGFloat = 2.0) -> CGImage? {
 
 // MARK: - OCR
 
+/// Run a text-recognition request at the given orientation and return
+/// (recognized text, average confidence, total characters).
+func recognizeText(
+    cgImage: CGImage,
+    orientation: CGImagePropertyOrientation,
+    level: VNRequestTextRecognitionLevel
+) throws -> (text: String, confidence: Float, chars: Int) {
+    var pageText = ""
+    var confidence: Float = 0
+    var chars = 0
+    let sema = DispatchSemaphore(value: 0)
+
+    let request = VNRecognizeTextRequest { req, _ in
+        defer { sema.signal() }
+        guard let obs = req.results as? [VNRecognizedTextObservation] else { return }
+        var lines: [String] = []
+        var confSum: Float = 0
+        var confCount = 0
+        for o in obs {
+            guard let cand = o.topCandidates(1).first else { continue }
+            lines.append(cand.string)
+            confSum += cand.confidence
+            confCount += 1
+            chars += cand.string.count
+        }
+        pageText = lines.joined(separator: "\n")
+        confidence = confCount > 0 ? confSum / Float(confCount) : 0
+    }
+    request.recognitionLevel = level
+    request.usesLanguageCorrection = (level == .accurate)
+
+    let handler = VNImageRequestHandler(cgImage: cgImage, orientation: orientation, options: [:])
+    try handler.perform([request])
+    sema.wait()
+
+    return (pageText, confidence, chars)
+}
+
+/// Determine which of the 4 cardinal orientations a scanned page is in by
+/// running a quick text-recognition pass at each and picking the one with
+/// the most recognized characters (ties broken by avg confidence).
+/// Vision has no dedicated orientation-detection API, so this is the
+/// idiomatic workaround.
+func detectOrientation(cgImage: CGImage) -> CGImagePropertyOrientation {
+    let candidates: [CGImagePropertyOrientation] = [.up, .right, .down, .left]
+    var best: (orientation: CGImagePropertyOrientation, chars: Int, confidence: Float) =
+        (.up, -1, 0)
+
+    for o in candidates {
+        guard let result = try? recognizeText(cgImage: cgImage, orientation: o, level: .fast) else {
+            continue
+        }
+        if result.chars > best.chars ||
+            (result.chars == best.chars && result.confidence > best.confidence) {
+            best = (o, result.chars, result.confidence)
+        }
+    }
+    return best.orientation
+}
+
 func extractText(from pdfURL: URL) throws -> String {
     guard let pdf = PDFDocument(url: pdfURL) else {
         throw NSError(domain: "ScanProcessor", code: 1,
@@ -61,22 +121,18 @@ func extractText(from pdfURL: URL) throws -> String {
         guard let page = pdf.page(at: i),
               let cgImage = renderPage(page) else { continue }
 
-        var pageText = ""
-        let sema = DispatchSemaphore(value: 0)
-
-        let request = VNRecognizeTextRequest { req, _ in
-            defer { sema.signal() }
-            guard let obs = req.results as? [VNRecognizedTextObservation] else { return }
-            pageText = obs.compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+        // Auto-rotate: detect the correct orientation per page (handles
+        // upside-down scans and landscape sheets), then OCR at that
+        // orientation with the high-accuracy recognizer.
+        let orientation = detectOrientation(cgImage: cgImage)
+        if orientation != .up {
+            let labels: [CGImagePropertyOrientation: String] =
+                [.right: "90° CW", .down: "180°", .left: "90° CCW"]
+            fputs("  page \(i + 1): rotated \(labels[orientation] ?? "?") — auto-correcting\n", stderr)
         }
-        request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = true
 
-        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        try handler.perform([request])
-        sema.wait()
-
-        if !pageText.isEmpty { pages.append(pageText) }
+        let result = try recognizeText(cgImage: cgImage, orientation: orientation, level: .accurate)
+        if !result.text.isEmpty { pages.append(result.text) }
     }
 
     return pages.joined(separator: "\n\n---\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
