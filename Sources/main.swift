@@ -88,22 +88,39 @@ func recognizeText(
 }
 
 /// Determine which of the 4 cardinal orientations a scanned page is in by
-/// running a quick text-recognition pass at each and picking the one with
-/// the most recognized characters (ties broken by avg confidence).
-/// Vision has no dedicated orientation-detection API, so this is the
-/// idiomatic workaround.
+/// running a quick text-recognition pass at each. Vision's recognizer is
+/// good enough that it can read upside-down or sideways text, so the raw
+/// character counts at .up vs .down are often close. We therefore strongly
+/// bias toward .up: a non-up orientation only "wins" if it produces
+/// noticeably more text AND noticeably higher confidence than upright.
 func detectOrientation(cgImage: CGImage) -> CGImagePropertyOrientation {
-    let candidates: [CGImagePropertyOrientation] = [.up, .right, .down, .left]
-    var best: (orientation: CGImagePropertyOrientation, chars: Int, confidence: Float) =
-        (.up, -1, 0)
+    // Score .up first as the baseline.
+    guard let upScore = try? recognizeText(cgImage: cgImage, orientation: .up, level: .fast) else {
+        return .up
+    }
 
-    for o in candidates {
-        guard let result = try? recognizeText(cgImage: cgImage, orientation: o, level: .fast) else {
+    // Heuristics for "this rotation is clearly better than upright":
+    //   - at least 30% more recognized characters, AND
+    //   - at least 0.05 higher average confidence
+    // Tuned so that an actually-rotated page (where upright produces
+    // mostly garbage) still flips, but a clean upright page never does.
+    let charMargin: Double = 1.30
+    let confMargin: Float = 0.05
+
+    var best: (orientation: CGImagePropertyOrientation, chars: Int, confidence: Float) =
+        (.up, upScore.chars, upScore.confidence)
+
+    for o in [CGImagePropertyOrientation.right, .down, .left] {
+        guard let r = try? recognizeText(cgImage: cgImage, orientation: o, level: .fast) else {
             continue
         }
-        if result.chars > best.chars ||
-            (result.chars == best.chars && result.confidence > best.confidence) {
-            best = (o, result.chars, result.confidence)
+        let charsBetter = Double(r.chars) >= Double(upScore.chars) * charMargin
+        let confBetter  = r.confidence    >= upScore.confidence    + confMargin
+        // Also require it to beat the current non-up best, if any.
+        let beatsBest   = r.chars > best.chars ||
+                          (r.chars == best.chars && r.confidence > best.confidence)
+        if charsBetter && confBetter && beatsBest {
+            best = (o, r.chars, r.confidence)
         }
     }
     return best.orientation
