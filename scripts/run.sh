@@ -88,16 +88,21 @@ while IFS= read -r -d '' pdf; do
     title=$(python3 -c "import sys,json; print(json.load(open('$tmpjson'))['title'])")
     summary=$(python3 -c "import sys,json; print(json.load(open('$tmpjson'))['summary'])")
     keywords=$(python3 -c "import sys,json; print(', '.join(json.load(open('$tmpjson'))['keywords']))")
+    source_lang=$(python3 -c "import sys,json; print(json.load(open('$tmpjson')).get('sourceLanguage') or '')")
+    translation=$(python3 -c "import sys,json; print(json.load(open('$tmpjson')).get('translation') or '')")
     rm -f "$tmpjson"
 
     log "  Title: $title"
     log "  Keywords: $keywords"
+    [[ -n "$source_lang" ]] && log "  Source language: $source_lang (translation included)"
 
     # Create Apple Note
     if python3 "$CREATE_NOTE" \
         --title    "$title" \
         --summary  "$summary" \
         --keywords "$keywords" \
+        --source-lang "$source_lang" \
+        --translation "$translation" \
         --pdf      "$pdf" \
         --folder   "$NOTES_FOLDER" 2>>"$LOG"; then
 

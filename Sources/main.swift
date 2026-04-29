@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import NaturalLanguage
 import PDFKit
 import Vision
 import FoundationModels
@@ -79,6 +80,10 @@ func recognizeText(
     }
     request.recognitionLevel = level
     request.usesLanguageCorrection = (level == .accurate)
+    // Recognize English + Japanese. Vision auto-detects which to use per
+    // observation. Adding Japanese is essentially free for English-only
+    // documents but enables OCR on Japanese scans.
+    request.recognitionLanguages = ["en-US", "ja"]
 
     let handler = VNImageRequestHandler(cgImage: cgImage, orientation: orientation, options: [:])
     try handler.perform([request])
@@ -321,12 +326,72 @@ func fallbackAnalysis(text: String, filename: String, reason: String) -> Documen
     return DocumentAnalysis(title: title, summary: summary, keywords: ["unanalyzed"])
 }
 
+// MARK: - Translation
+
+/// Detect the dominant language of the OCR'd text. Returns a BCP-47
+/// language code (e.g., "en", "ja", "de") or nil if undetermined.
+func detectLanguage(_ text: String) -> String? {
+    let sample = String(text.prefix(2000))
+    let recognizer = NLLanguageRecognizer()
+    recognizer.processString(sample)
+    guard let lang = recognizer.dominantLanguage else { return nil }
+    return lang.rawValue
+}
+
+/// Translate non-English OCR text to English using Foundation Models.
+/// Returns nil if translation fails for any reason — caller should treat
+/// translation as best-effort and not block note creation on it.
+func translateToEnglish(text: String, sourceLanguage: String) async -> String? {
+    let model = SystemLanguageModel.default
+    guard model.availability == .available else { return nil }
+
+    // Map common ISO codes to friendly names so the model knows what to do.
+    let langName: String = {
+        switch sourceLanguage {
+        case "ja":      return "Japanese"
+        case "zh", "zh-Hans", "zh-Hant": return "Chinese"
+        case "ko":      return "Korean"
+        case "de":      return "German"
+        case "fr":      return "French"
+        case "es":      return "Spanish"
+        case "it":      return "Italian"
+        case "pt":      return "Portuguese"
+        case "ru":      return "Russian"
+        default:        return sourceLanguage
+        }
+    }()
+
+    let session = LanguageModelSession {
+        """
+        You are a professional translator. Translate the user's text from \
+        \(langName) into clear, natural English. Preserve paragraph breaks \
+        and the original meaning. Output only the translation — no notes, \
+        no commentary, no preamble.
+        """
+    }
+
+    // Cap at ~3000 chars to stay well within the context window after the
+    // English output has been generated.
+    let excerpt = String(text.prefix(3000))
+
+    do {
+        let response = try await session.respond(to: excerpt)
+        let translated = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        return translated.isEmpty ? nil : translated
+    } catch {
+        fputs("  translation failed: \(error.localizedDescription)\n", stderr)
+        return nil
+    }
+}
+
 // MARK: - Output
 
 struct Output: Codable {
     let title: String
     let summary: String
     let keywords: [String]
+    let sourceLanguage: String?  // BCP-47, only set when non-English
+    let translation: String?     // English translation, only set when non-English
 }
 
 // MARK: - Entry point
@@ -350,20 +415,43 @@ Task {
         fputs("[\(filename)] Extracting text via OCR...\n", stderr)
         let text = try extractText(from: pdfURL)
 
+        // Detect language. Anything other than English (or unknown) gets
+        // translated. We do this before the analysis step so the translated
+        // English text drives summarization — better titles + summaries.
+        var sourceLang: String? = nil
+        var translation: String? = nil
+        var textForAnalysis = text
+        if let lang = detectLanguage(text), lang != "en", !text.isEmpty {
+            sourceLang = lang
+            fputs("[\(filename)] Detected non-English content (\(lang)) — translating...\n", stderr)
+            if let translated = await translateToEnglish(text: text, sourceLanguage: lang) {
+                translation = translated
+                textForAnalysis = translated
+            } else {
+                fputs("[\(filename)] Translation unavailable — analyzing original text.\n", stderr)
+            }
+        }
+
         fputs("[\(filename)] Analysing with Foundation Models...\n", stderr)
         let analysis: DocumentAnalysis
         do {
-            analysis = try await analyzeDocument(text: text, filename: filename)
+            analysis = try await analyzeDocument(text: textForAnalysis, filename: filename)
         } catch {
             // Don't lose the file just because the model choked. Common causes:
             // unsupported language/locale, safety guardrails, garbled OCR.
             // Fall back to filename-derived metadata so the note still lands.
             fputs("[\(filename)] AI analysis failed: \(error.localizedDescription) — using filename-only fallback.\n", stderr)
-            analysis = fallbackAnalysis(text: text, filename: filename,
+            analysis = fallbackAnalysis(text: textForAnalysis, filename: filename,
                                         reason: error.localizedDescription)
         }
 
-        let output = Output(title: analysis.title, summary: analysis.summary, keywords: analysis.keywords)
+        let output = Output(
+            title: analysis.title,
+            summary: analysis.summary,
+            keywords: analysis.keywords,
+            sourceLanguage: sourceLang,
+            translation: translation
+        )
         let encoder = JSONEncoder()
         encoder.outputFormatting = .prettyPrinted
         let json = try encoder.encode(output)

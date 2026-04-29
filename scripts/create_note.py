@@ -16,12 +16,28 @@ import subprocess
 import sys
 
 
-def build_note_body(summary: str, keywords: str, filename: str) -> str:
+def build_note_body(summary: str, keywords: str, filename: str,
+                    translation: str = "", source_lang: str = "") -> str:
     """Build an HTML body for the note — Notes renders basic HTML."""
+    parts = [
+        f"<br><b>Summary</b><br>{html_escape(summary)}",
+        f"<br><br><b>Keywords</b><br>{html_escape(keywords)}",
+    ]
+    if translation:
+        label = f"English Translation (from {source_lang})" if source_lang else "English Translation"
+        # Preserve paragraph breaks from the model output.
+        translation_html = html_escape(translation).replace("\n", "<br>")
+        parts.append(f"<br><br><b>{label}</b><br>{translation_html}")
+    parts.append(f"<br><br><b>Source file</b><br>{html_escape(filename)}")
+    return "".join(parts)
+
+
+def html_escape(s: str) -> str:
+    """Minimal HTML escaping for note body content."""
     return (
-        f"<br><b>Summary</b><br>{summary}"
-        f"<br><br><b>Keywords</b><br>{keywords}"
-        f"<br><br><b>Source file</b><br>{filename}"
+        s.replace("&", "&amp;")
+         .replace("<", "&lt;")
+         .replace(">", "&gt;")
     )
 
 
@@ -83,9 +99,19 @@ def main():
     parser.add_argument("--keywords", required=True)
     parser.add_argument("--pdf",      required=True)
     parser.add_argument("--folder",   default="Scanned Documents")
+    parser.add_argument("--translation", default="",
+                        help="Optional English translation of the document body.")
+    parser.add_argument("--source-lang", default="",
+                        help="BCP-47 source language code (used in the translation header).")
     args = parser.parse_args()
 
-    body = build_note_body(args.summary, args.keywords, args.pdf.split("/")[-1])
+    body = build_note_body(
+        args.summary,
+        args.keywords,
+        args.pdf.split("/")[-1],
+        translation=args.translation,
+        source_lang=args.source_lang,
+    )
 
     success = create_note(
         title=args.title,
