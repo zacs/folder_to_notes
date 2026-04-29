@@ -9,7 +9,7 @@ set -euo pipefail
 # file change. Without this, two concurrent runs both pass the processed.txt
 # check and we create duplicate notes / attachments.
 # (macOS doesn't ship flock(1), so we use an atomic mkdir as a lock.)
-LOCK_DIR="/tmp/scanner-to-notes.lock"
+LOCK_DIR="/tmp/folder-to-notes.lock"
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     # Another instance is already handling this batch — exit silently.
     exit 0

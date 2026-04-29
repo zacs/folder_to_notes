@@ -1,5 +1,5 @@
 #!/bin/bash
-# install.sh — Set up scanner-to-notes.
+# install.sh — Set up folder-to-notes.
 # Run once from the project directory: bash install.sh
 
 set -euo pipefail
@@ -9,7 +9,7 @@ INSTALL_DIR="$SCRIPT_DIR"
 
 # ── Prompt for config ────────────────────────────────────────────────────────
 echo ""
-echo "=== scanner-to-notes installer ==="
+echo "=== folder-to-notes installer ==="
 echo ""
 
 # When invoked via `curl ... | bash`, stdin is the pipe from curl, not the
@@ -60,8 +60,16 @@ echo "   ✓ Compiled: $INSTALL_DIR/bin/process_scan"
 # ── Install launchd plist ────────────────────────────────────────────────────
 echo "→ Installing launchd agent..."
 
-PLIST_SRC="$INSTALL_DIR/launchd/com.user.scanner-to-notes.plist"
-PLIST_DEST="${HOME}/Library/LaunchAgents/com.user.scanner-to-notes.plist"
+PLIST_SRC="$INSTALL_DIR/launchd/com.user.folder-to-notes.plist"
+PLIST_DEST="${HOME}/Library/LaunchAgents/com.user.folder-to-notes.plist"
+OLD_PLIST_DEST="${HOME}/Library/LaunchAgents/com.user.scanner-to-notes.plist"
+
+# Migrate from old name if present (project was previously called scanner-to-notes).
+if [[ -f "$OLD_PLIST_DEST" ]]; then
+    echo "   → Removing legacy LaunchAgent (com.user.scanner-to-notes)"
+    launchctl unload "$OLD_PLIST_DEST" 2>/dev/null || true
+    rm -f "$OLD_PLIST_DEST"
+fi
 
 # Substitute placeholders
 sed \
@@ -87,6 +95,6 @@ echo "Drop a PDF into ${DROPBOX_PATH} to test."
 echo "Tail logs with: tail -f ${INSTALL_DIR}/logs/scanner.log"
 echo ""
 echo "To uninstall:"
-echo "  launchctl unload ~/Library/LaunchAgents/com.user.scanner-to-notes.plist"
-echo "  rm ~/Library/LaunchAgents/com.user.scanner-to-notes.plist"
+echo "  launchctl unload ~/Library/LaunchAgents/com.user.folder-to-notes.plist"
+echo "  rm ~/Library/LaunchAgents/com.user.folder-to-notes.plist"
 echo ""

@@ -72,7 +72,7 @@ Dropbox folder (local sync)
 ## File structure
 
 ```
-scanner-to-notes/
+folder-to-notes/
 ├── install.sh              ← run once to set up
 ├── Sources/
 │   └── main.swift          ← Swift OCR + AI tool
@@ -80,7 +80,7 @@ scanner-to-notes/
 │   ├── run.sh              ← shell orchestration (called by launchd)
 │   └── create_note.py      ← AppleScript wrapper with proper escaping
 ├── launchd/
-│   └── com.user.scanner-to-notes.plist  ← launchd template
+│   └── com.user.folder-to-notes.plist  ← launchd template
 ├── bin/
 │   └── process_scan        ← compiled Swift binary (created by install.sh)
 ├── state/
@@ -96,31 +96,31 @@ scanner-to-notes/
 
 **Tail the log:**
 ```bash
-tail -f ~/scanner-to-notes/logs/scanner.log
+tail -f ~/.folder-to-notes/logs/scanner.log
 ```
 
 **Manually trigger a run:**
 ```bash
-bash ~/scanner-to-notes/scripts/run.sh
+bash ~/.folder-to-notes/scripts/run.sh
 ```
 
 **Test the Swift tool standalone:**
 ```bash
-~/scanner-to-notes/bin/process_scan ~/path/to/test.pdf
+~/.folder-to-notes/bin/process_scan ~/path/to/test.pdf
 ```
 
 **Reprocess a file** (if something went wrong):
 ```bash
 # Remove its entry from the processed list
-sed -i '' '/filename.pdf/d' ~/scanner-to-notes/state/processed.txt
+sed -i '' '/filename.pdf/d' ~/.folder-to-notes/state/processed.txt
 # Then drop the file in the folder or run manually
 ```
 
 **Change the Dropbox folder or Notes folder:**
 Edit the variables at the top of `scripts/run.sh` and reload the agent:
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.user.scanner-to-notes.plist
-launchctl load  ~/Library/LaunchAgents/com.user.scanner-to-notes.plist
+launchctl unload ~/Library/LaunchAgents/com.user.folder-to-notes.plist
+launchctl load  ~/Library/LaunchAgents/com.user.folder-to-notes.plist
 ```
 
 ---
@@ -128,7 +128,7 @@ launchctl load  ~/Library/LaunchAgents/com.user.scanner-to-notes.plist
 ## Uninstall
 
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.user.scanner-to-notes.plist
-rm ~/Library/LaunchAgents/com.user.scanner-to-notes.plist
-rm -rf ~/scanner-to-notes
+launchctl unload ~/Library/LaunchAgents/com.user.folder-to-notes.plist
+rm ~/Library/LaunchAgents/com.user.folder-to-notes.plist
+rm -rf ~/.folder-to-notes
 ```

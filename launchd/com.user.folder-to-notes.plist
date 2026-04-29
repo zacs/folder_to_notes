@@ -5,7 +5,7 @@
 <dict>
 
     <key>Label</key>
-    <string>com.user.scanner-to-notes</string>
+    <string>com.user.folder-to-notes</string>
 
     <key>ProgramArguments</key>
     <array>
