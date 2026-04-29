@@ -201,6 +201,37 @@ func analyzeDocument(text: String, filename: String) async throws -> DocumentAna
                       userInfo: [NSLocalizedDescriptionKey: "Foundation Models unavailable (\(model.availability)). Is Apple Intelligence enabled in System Settings?"])
     }
 
+    // Strip OCR garbage (barcodes, decorative glyphs) before sending. Falls
+    // back to the raw text only if sanitization removed essentially everything.
+    let cleaned = sanitizeOCRText(text)
+    let usable = cleaned.count >= 40 ? cleaned : text
+
+    // Try progressively shorter excerpts. Apple's on-device model surfaces
+    // safety-guardrail rejections (common on financial/PII content) as a
+    // generic "unsupported language or locale" error — and a smaller
+    // header-only excerpt usually slips through where the full first 4000
+    // chars trip it.
+    let attempts: [(label: String, length: Int)] = [
+        ("full",  4000),
+        ("short", 800),
+        ("tiny",  300),
+    ]
+
+    var lastError: Error?
+    for attempt in attempts {
+        do {
+            return try await runAnalysis(text: usable, filename: filename,
+                                         maxLen: attempt.length)
+        } catch {
+            lastError = error
+            fputs("[\(filename)] AI attempt '\(attempt.label)' failed: \(error.localizedDescription) — retrying with smaller excerpt.\n", stderr)
+        }
+    }
+    throw lastError ?? NSError(domain: "ScanProcessor", code: 5,
+                               userInfo: [NSLocalizedDescriptionKey: "AI analysis failed for unknown reason."])
+}
+
+private func runAnalysis(text: String, filename: String, maxLen: Int) async throws -> DocumentAnalysis {
     let session = LanguageModelSession {
         """
         You are a document analyst helping organize a personal document archive. \
@@ -218,15 +249,9 @@ func analyzeDocument(text: String, filename: String) async throws -> DocumentAna
         """
     }
 
-    // Strip OCR garbage (barcodes, decorative glyphs) before sending. Falls
-    // back to the raw text only if sanitization removed essentially everything.
-    let cleaned = sanitizeOCRText(text)
-    let usable = cleaned.count >= 40 ? cleaned : text
-
-    // Trim to ~4000 chars — well within the on-device model's context window
-    let excerpt = usable.isEmpty
+    let excerpt = text.isEmpty
         ? "(No text could be extracted — document may be blank or purely graphical.)"
-        : String(usable.prefix(4000))
+        : String(text.prefix(maxLen))
 
     let prompt = """
     Filename: \(filename)
@@ -267,17 +292,30 @@ func analyzeDocument(text: String, filename: String) async throws -> DocumentAna
 /// network/availability issues, garbled OCR, etc.). The note still gets
 /// created and the PDF still gets attached — just without the nice summary.
 func fallbackAnalysis(text: String, filename: String, reason: String) -> DocumentAnalysis {
-    // Strip extension and clean up the filename for use as a title.
-    let base = (filename as NSString).deletingPathExtension
-    let cleaned = base
-        .replacingOccurrences(of: "_", with: " ")
-        .replacingOccurrences(of: "-", with: " ")
-        .trimmingCharacters(in: .whitespaces)
-    let title = cleaned.isEmpty ? filename : cleaned
+    // Prefer a title pulled from the cleaned OCR text — the filename is
+    // often garbage on documents that trigger this path (scanner-generated
+    // names full of barcode noise).
+    let cleaned = sanitizeOCRText(text)
+    let firstLine = cleaned
+        .split(whereSeparator: \.isNewline)
+        .first
+        .map { String($0).trimmingCharacters(in: .whitespaces) } ?? ""
 
-    let snippet = text.isEmpty
+    let title: String
+    if firstLine.count >= 5 {
+        title = String(firstLine.prefix(80))
+    } else {
+        let base = (filename as NSString).deletingPathExtension
+        let cleanedName = base
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .trimmingCharacters(in: .whitespaces)
+        title = cleanedName.isEmpty ? filename : cleanedName
+    }
+
+    let snippet = cleaned.isEmpty
         ? "(No text could be extracted from this document.)"
-        : String(text.prefix(400))
+        : String(cleaned.prefix(400))
     let summary = "AI analysis unavailable (\(reason)). First text excerpt: \(snippet)"
 
     return DocumentAnalysis(title: title, summary: summary, keywords: ["unanalyzed"])
