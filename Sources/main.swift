@@ -157,6 +157,43 @@ func extractText(from pdfURL: URL) throws -> String {
 
 // MARK: - AI analysis
 
+/// Strip OCR noise (typically misread barcodes, QR codes, and decorative
+/// glyphs) so the language model sees mostly real prose. Foundation Models'
+/// language detector throws "unsupported language or locale" if the input
+/// is dominated by garbage tokens — even when most of the document is
+/// perfectly normal English further down the page.
+///
+/// Heuristic: keep a line if it looks like natural language. We require
+///   - at least 3 letters total, AND
+///   - at least 60% of non-space characters are letters/digits/basic punct, AND
+///   - it contains at least one word ≥ 3 letters long
+func sanitizeOCRText(_ text: String) -> String {
+    func isWordy(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty { return false }
+
+        var letters = 0
+        var sane = 0
+        var nonSpace = 0
+        for ch in trimmed {
+            if ch.isWhitespace { continue }
+            nonSpace += 1
+            if ch.isLetter { letters += 1; sane += 1 }
+            else if ch.isNumber { sane += 1 }
+            else if ".,;:!?'\"()[]/-$%&@#".contains(ch) { sane += 1 }
+        }
+        guard letters >= 3, nonSpace > 0 else { return false }
+        guard Double(sane) / Double(nonSpace) >= 0.60 else { return false }
+
+        // Require at least one "real" word (3+ consecutive letters).
+        let words = trimmed.split(whereSeparator: { !$0.isLetter })
+        return words.contains(where: { $0.count >= 3 })
+    }
+
+    let kept = text.split(whereSeparator: \.isNewline).filter { isWordy(String($0)) }
+    return kept.joined(separator: "\n")
+}
+
 func analyzeDocument(text: String, filename: String) async throws -> DocumentAnalysis {
     let model = SystemLanguageModel.default
     guard model.availability == .available else {
@@ -181,10 +218,15 @@ func analyzeDocument(text: String, filename: String) async throws -> DocumentAna
         """
     }
 
+    // Strip OCR garbage (barcodes, decorative glyphs) before sending. Falls
+    // back to the raw text only if sanitization removed essentially everything.
+    let cleaned = sanitizeOCRText(text)
+    let usable = cleaned.count >= 40 ? cleaned : text
+
     // Trim to ~4000 chars — well within the on-device model's context window
-    let excerpt = text.isEmpty
+    let excerpt = usable.isEmpty
         ? "(No text could be extracted — document may be blank or purely graphical.)"
-        : String(text.prefix(4000))
+        : String(usable.prefix(4000))
 
     let prompt = """
     Filename: \(filename)
@@ -218,6 +260,29 @@ func analyzeDocument(text: String, filename: String) async throws -> DocumentAna
     }
 }
 
+// MARK: - Fallback metadata
+
+/// Build a sensible DocumentAnalysis from just the filename + raw OCR text,
+/// for cases when the AI model fails (unsupported language, guardrails,
+/// network/availability issues, garbled OCR, etc.). The note still gets
+/// created and the PDF still gets attached — just without the nice summary.
+func fallbackAnalysis(text: String, filename: String, reason: String) -> DocumentAnalysis {
+    // Strip extension and clean up the filename for use as a title.
+    let base = (filename as NSString).deletingPathExtension
+    let cleaned = base
+        .replacingOccurrences(of: "_", with: " ")
+        .replacingOccurrences(of: "-", with: " ")
+        .trimmingCharacters(in: .whitespaces)
+    let title = cleaned.isEmpty ? filename : cleaned
+
+    let snippet = text.isEmpty
+        ? "(No text could be extracted from this document.)"
+        : String(text.prefix(400))
+    let summary = "AI analysis unavailable (\(reason)). First text excerpt: \(snippet)"
+
+    return DocumentAnalysis(title: title, summary: summary, keywords: ["unanalyzed"])
+}
+
 // MARK: - Output
 
 struct Output: Codable {
@@ -248,7 +313,17 @@ Task {
         let text = try extractText(from: pdfURL)
 
         fputs("[\(filename)] Analysing with Foundation Models...\n", stderr)
-        let analysis = try await analyzeDocument(text: text, filename: filename)
+        let analysis: DocumentAnalysis
+        do {
+            analysis = try await analyzeDocument(text: text, filename: filename)
+        } catch {
+            // Don't lose the file just because the model choked. Common causes:
+            // unsupported language/locale, safety guardrails, garbled OCR.
+            // Fall back to filename-derived metadata so the note still lands.
+            fputs("[\(filename)] AI analysis failed: \(error.localizedDescription) — using filename-only fallback.\n", stderr)
+            analysis = fallbackAnalysis(text: text, filename: filename,
+                                        reason: error.localizedDescription)
+        }
 
         let output = Output(title: analysis.title, summary: analysis.summary, keywords: analysis.keywords)
         let encoder = JSONEncoder()
