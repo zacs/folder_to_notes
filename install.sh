@@ -6,6 +6,18 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="$SCRIPT_DIR"
+CONFIG_FILE="$INSTALL_DIR/state/config"
+
+# ── Load previous answers as defaults (if any) ──────────────────────────────
+# Saved from a prior install run so re-running the bootstrap is hit-Enter-twice.
+DEFAULT_DROPBOX="${HOME}/Dropbox/Scanner"
+DEFAULT_NOTES="Scanned Documents"
+if [[ -f "$CONFIG_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+    DEFAULT_DROPBOX="${SAVED_DROPBOX_PATH:-$DEFAULT_DROPBOX}"
+    DEFAULT_NOTES="${SAVED_NOTES_FOLDER:-$DEFAULT_NOTES}"
+fi
 
 # ── Prompt for config ────────────────────────────────────────────────────────
 echo ""
@@ -21,11 +33,11 @@ else
     PROMPT_IN=/dev/stdin
 fi
 
-read -rp "Dropbox scanner folder path [${HOME}/Dropbox/Scanner]: " DROPBOX_PATH < "$PROMPT_IN"
-DROPBOX_PATH="${DROPBOX_PATH:-${HOME}/Dropbox/Scanner}"
+read -rp "Dropbox scanner folder path [${DEFAULT_DROPBOX}]: " DROPBOX_PATH < "$PROMPT_IN"
+DROPBOX_PATH="${DROPBOX_PATH:-${DEFAULT_DROPBOX}}"
 
-read -rp "Apple Notes folder name [Scanned Documents]: " NOTES_FOLDER < "$PROMPT_IN"
-NOTES_FOLDER="${NOTES_FOLDER:-Scanned Documents}"
+read -rp "Apple Notes folder name [${DEFAULT_NOTES}]: " NOTES_FOLDER < "$PROMPT_IN"
+NOTES_FOLDER="${NOTES_FOLDER:-${DEFAULT_NOTES}}"
 
 echo ""
 
@@ -33,6 +45,13 @@ echo ""
 echo "→ Creating directories..."
 mkdir -p "$INSTALL_DIR"/{bin,state,logs}
 touch "$INSTALL_DIR/state/processed.txt"
+
+# ── Persist answers for next time ────────────────────────────────────────────
+cat > "$CONFIG_FILE" <<EOF
+# Saved by install.sh — used as defaults on the next install run.
+SAVED_DROPBOX_PATH="${DROPBOX_PATH}"
+SAVED_NOTES_FOLDER="${NOTES_FOLDER}"
+EOF
 
 # ── Update run.sh with Notes folder ─────────────────────────────────────────
 echo "→ Configuring run.sh..."
