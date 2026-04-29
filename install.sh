@@ -44,7 +44,9 @@ echo ""
 # ── Directories ──────────────────────────────────────────────────────────────
 echo "→ Creating directories..."
 mkdir -p "$INSTALL_DIR"/{bin,state,logs}
-touch "$INSTALL_DIR/state/processed.txt"
+# Create the ImportComplete folder inside the watched Dropbox folder.
+# Processed PDFs are moved here — this is our durable, cross-machine state.
+mkdir -p "$DROPBOX_PATH/ImportComplete" 2>/dev/null || true
 
 # ── Persist answers for next time ────────────────────────────────────────────
 cat > "$CONFIG_FILE" <<EOF

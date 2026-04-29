@@ -53,7 +53,8 @@ Dropbox folder (local sync)
         │  launchd WatchPaths fires on any change
         ▼
    scripts/run.sh
-        │  finds new .pdf files not in state/processed.txt
+        │  finds new .pdf files at the top of the watched folder
+        │  (anything in ImportComplete/ has already been handled)
         ▼
    bin/process_scan  (Swift CLI)
         │  Vision framework — OCR each page at 2x scale
@@ -65,6 +66,10 @@ Dropbox folder (local sync)
         │  attaches original PDF
         ▼
    Apple Notes / iCloud
+
+   Then: PDF is moved into Dropbox/Scanner/ImportComplete/
+   so it won't be reprocessed (state lives in Dropbox — survives
+   moving to a new machine).
 ```
 
 ---
@@ -83,12 +88,15 @@ Dropbox folder (local sync)
 │   └── com.user.folder-to-notes.plist  ← launchd template
 ├── bin/
 │   └── process_scan        ← compiled Swift binary (created by install.sh)
-├── state/
-│   └── processed.txt       ← tracks which files have been handled
 └── logs/
     ├── scanner.log
     └── scanner-error.log
 ```
+
+Processed PDFs are moved into `<your-Dropbox-scanner-folder>/ImportComplete/`,
+which is the durable record of what's already been handled. Because that folder
+lives inside Dropbox, the state syncs across machines — no risk of
+reprocessing every PDF if you set this up on a second Mac.
 
 ---
 
@@ -111,9 +119,9 @@ bash ~/.folder-to-notes/scripts/run.sh
 
 **Reprocess a file** (if something went wrong):
 ```bash
-# Remove its entry from the processed list
-sed -i '' '/filename.pdf/d' ~/.folder-to-notes/state/processed.txt
-# Then drop the file in the folder or run manually
+# Move it back from the ImportComplete folder to the watched folder
+mv ~/Dropbox/Scanner/ImportComplete/filename.pdf ~/Dropbox/Scanner/
+# Then drop another file in the folder, or run manually
 ```
 
 **Change the Dropbox folder or Notes folder:**

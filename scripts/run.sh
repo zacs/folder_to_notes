@@ -6,8 +6,8 @@ set -euo pipefail
 
 # ── Single-instance guard ────────────────────────────────────────────────────
 # launchd can fire WatchPaths events twice in rapid succession for a single
-# file change. Without this, two concurrent runs both pass the processed.txt
-# check and we create duplicate notes / attachments.
+# file change. Without this, two concurrent runs both try to process the same
+# PDFs and we create duplicate notes / attachments.
 # (macOS doesn't ship flock(1), so we use an atomic mkdir as a lock.)
 LOCK_DIR="/tmp/folder-to-notes.lock"
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
@@ -25,7 +25,7 @@ NOTES_FOLDER="Inbox"       # Folder name inside Apple Notes / iCloud
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="${BASE_DIR}/bin/process_scan"
 CREATE_NOTE="${BASE_DIR}/scripts/create_note.py"
-PROCESSED_FILE="${BASE_DIR}/state/processed.txt"
+DONE_FOLDER="${DROPBOX_FOLDER}/ImportComplete"
 LOG="${BASE_DIR}/logs/scanner.log"
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -46,7 +46,7 @@ die() {
 [[ -f "$CREATE_NOTE" ]]   || die "create_note.py not found at $CREATE_NOTE"
 [[ -d "$DROPBOX_FOLDER" ]] || { log "Dropbox folder not found: $DROPBOX_FOLDER — skipping run"; exit 0; }
 
-touch "$PROCESSED_FILE"
+mkdir -p "$DONE_FOLDER"
 
 # Brief pause — Dropbox may still be syncing when launchd fires
 sleep 3
@@ -59,11 +59,6 @@ processed=0
 while IFS= read -r -d '' pdf; do
     filename=$(basename "$pdf")
     found=$((found + 1))
-
-    # Already handled?
-    if grep -qxF "$filename" "$PROCESSED_FILE"; then
-        continue
-    fi
 
     # Wait for file size to stabilise (still syncing guard)
     size1=$(stat -f%z "$pdf" 2>/dev/null || echo 0)
@@ -107,8 +102,23 @@ while IFS= read -r -d '' pdf; do
         --folder   "$NOTES_FOLDER" 2>>"$LOG"; then
 
         log "  ✓ Note created: $title"
-        echo "$filename" >> "$PROCESSED_FILE"
-        processed=$((processed + 1))
+
+        # Move processed PDF into ImportComplete/ so it won't be picked up
+        # again. The destination folder lives inside the watched Dropbox
+        # folder, so the state survives moves between machines (Dropbox
+        # syncs the move) and there's no local-only state file to lose.
+        # If a same-named file already exists there, suffix with timestamp.
+        dest="${DONE_FOLDER}/${filename}"
+        if [[ -e "$dest" ]]; then
+            ts=$(date '+%Y%m%d-%H%M%S')
+            base="${filename%.pdf}"
+            dest="${DONE_FOLDER}/${base} (${ts}).pdf"
+        fi
+        if mv "$pdf" "$dest"; then
+            processed=$((processed + 1))
+        else
+            log "  WARN: Note created but could not move $filename to ImportComplete"
+        fi
     else
         log "  ERROR: Failed to create note for $filename"
     fi
