@@ -48,36 +48,61 @@ func renderPage(_ page: PDFPage, scale: CGFloat = 2.0) -> CGImage? {
     return ctx.makeImage()
 }
 
+/// Transform `ctx` so that content drawn in a `size`-sized box at the origin
+/// comes out rotated clockwise by `quarterTurns` × 90°, filling the rotated
+/// bounds. Shared by the bitmap rotation below and the translated-PDF
+/// writer, so OCR coordinates and the redrawn page always line up.
+func applyQuarterTurns(_ quarterTurns: Int, sourceSize size: CGSize, to ctx: CGContext) {
+    switch quarterTurns {
+    case 1:
+        ctx.translateBy(x: 0, y: size.width)
+        ctx.rotate(by: -.pi / 2)
+    case 2:
+        ctx.translateBy(x: size.width, y: size.height)
+        ctx.rotate(by: .pi)
+    case 3:
+        ctx.translateBy(x: size.height, y: 0)
+        ctx.rotate(by: .pi / 2)
+    default:
+        break
+    }
+}
+
+func rotate(_ image: CGImage, quarterTurns: Int) -> CGImage? {
+    if quarterTurns == 0 { return image }
+    let size = CGSize(width: image.width, height: image.height)
+    let (outW, outH) = quarterTurns % 2 == 0 ? (image.width, image.height) : (image.height, image.width)
+
+    guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+          let ctx = CGContext(
+            data: nil,
+            width: outW,
+            height: outH,
+            bitsPerComponent: 8,
+            bytesPerRow: outW * 4,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+          ) else { return nil }
+
+    applyQuarterTurns(quarterTurns, sourceSize: size, to: ctx)
+    ctx.draw(image, in: CGRect(origin: .zero, size: size))
+    return ctx.makeImage()
+}
+
 // MARK: - OCR
 
-/// Run a text-recognition request at the given orientation and return
-/// (recognized text, average confidence, total characters).
+struct OCRLine {
+    let text: String
+    let box: CGRect   // normalized to the image, origin bottom-left (Vision's convention)
+}
+
+/// Run a text-recognition request on an upright image and return the
+/// recognized lines plus average confidence and total characters.
 func recognizeText(
     cgImage: CGImage,
-    orientation: CGImagePropertyOrientation,
     level: VNRequestTextRecognitionLevel
-) throws -> (text: String, confidence: Float, chars: Int) {
-    var pageText = ""
-    var confidence: Float = 0
-    var chars = 0
-    let sema = DispatchSemaphore(value: 0)
-
-    let request = VNRecognizeTextRequest { req, _ in
-        defer { sema.signal() }
-        guard let obs = req.results as? [VNRecognizedTextObservation] else { return }
-        var lines: [String] = []
-        var confSum: Float = 0
-        var confCount = 0
-        for o in obs {
-            guard let cand = o.topCandidates(1).first else { continue }
-            lines.append(cand.string)
-            confSum += cand.confidence
-            confCount += 1
-            chars += cand.string.count
-        }
-        pageText = lines.joined(separator: "\n")
-        confidence = confCount > 0 ? confSum / Float(confCount) : 0
-    }
+) throws -> (lines: [OCRLine], confidence: Float, chars: Int) {
+    let request = VNRecognizeTextRequest()
     request.recognitionLevel = level
     request.usesLanguageCorrection = (level == .accurate)
     // Recognize English + Japanese. Vision auto-detects which to use per
@@ -92,26 +117,46 @@ func recognizeText(
     if let latest = supported.max() {
         request.revision = latest
     }
-    request.recognitionLanguages = ["en-US", "ja-JP"]
+    // Only ask for languages this level/revision supports — the fast
+    // recognizer handles Latin scripts only.
+    let wanted = ["en-US", "ja-JP"]
+    if let available = try? request.supportedRecognitionLanguages() {
+        let usable = wanted.filter { available.contains($0) }
+        if !usable.isEmpty { request.recognitionLanguages = usable }
+    } else {
+        request.recognitionLanguages = wanted
+    }
     request.automaticallyDetectsLanguage = true
 
-    let handler = VNImageRequestHandler(cgImage: cgImage, orientation: orientation, options: [:])
+    let handler = VNImageRequestHandler(cgImage: cgImage, orientation: .up, options: [:])
     try handler.perform([request])
-    sema.wait()
 
-    return (pageText, confidence, chars)
+    var lines: [OCRLine] = []
+    var confSum: Float = 0
+    var chars = 0
+    for o in request.results ?? [] {
+        guard let cand = o.topCandidates(1).first else { continue }
+        lines.append(OCRLine(text: cand.string, box: o.boundingBox))
+        confSum += cand.confidence
+        chars += cand.string.count
+    }
+    let confidence = lines.isEmpty ? 0 : confSum / Float(lines.count)
+    return (lines, confidence, chars)
 }
 
 /// Determine which of the 4 cardinal orientations a scanned page is in by
 /// running a quick text-recognition pass at each. Vision's recognizer is
 /// good enough that it can read upside-down or sideways text, so the raw
-/// character counts at .up vs .down are often close. We therefore strongly
-/// bias toward .up: a non-up orientation only "wins" if it produces
-/// noticeably more text AND noticeably higher confidence than upright.
-func detectOrientation(cgImage: CGImage) -> CGImagePropertyOrientation {
-    // Score .up first as the baseline.
-    guard let upScore = try? recognizeText(cgImage: cgImage, orientation: .up, level: .fast) else {
-        return .up
+/// character counts upright vs 180° are often close. We therefore strongly
+/// bias toward upright: a rotation only "wins" if it produces noticeably
+/// more text AND noticeably higher confidence than upright.
+///
+/// Returns the clockwise quarter turns that make the page upright, and the
+/// image rotated by that much.
+func detectOrientation(cgImage: CGImage) -> (quarterTurns: Int, image: CGImage) {
+    // Score upright first as the baseline.
+    guard let upScore = try? recognizeText(cgImage: cgImage, level: .fast) else {
+        return (0, cgImage)
     }
 
     // Heuristics for "this rotation is clearly better than upright":
@@ -122,52 +167,55 @@ func detectOrientation(cgImage: CGImage) -> CGImagePropertyOrientation {
     let charMargin: Double = 1.30
     let confMargin: Float = 0.05
 
-    var best: (orientation: CGImagePropertyOrientation, chars: Int, confidence: Float) =
-        (.up, upScore.chars, upScore.confidence)
+    var best: (quarterTurns: Int, image: CGImage, chars: Int, confidence: Float) =
+        (0, cgImage, upScore.chars, upScore.confidence)
 
-    for o in [CGImagePropertyOrientation.right, .down, .left] {
-        guard let r = try? recognizeText(cgImage: cgImage, orientation: o, level: .fast) else {
+    for turns in 1...3 {
+        guard let rotated = rotate(cgImage, quarterTurns: turns),
+              let r = try? recognizeText(cgImage: rotated, level: .fast) else {
             continue
         }
         let charsBetter = Double(r.chars) >= Double(upScore.chars) * charMargin
         let confBetter  = r.confidence    >= upScore.confidence    + confMargin
-        // Also require it to beat the current non-up best, if any.
+        // Also require it to beat the current non-upright best, if any.
         let beatsBest   = r.chars > best.chars ||
                           (r.chars == best.chars && r.confidence > best.confidence)
         if charsBetter && confBetter && beatsBest {
-            best = (o, r.chars, r.confidence)
+            best = (turns, rotated, r.chars, r.confidence)
         }
     }
-    return best.orientation
+    return (best.quarterTurns, best.image)
 }
 
-func extractText(from pdfURL: URL) throws -> String {
-    guard let pdf = PDFDocument(url: pdfURL) else {
-        throw NSError(domain: "ScanProcessor", code: 1,
-                      userInfo: [NSLocalizedDescriptionKey: "Could not load PDF at \(pdfURL.path)"])
-    }
+struct PageScan {
+    let index: Int          // page index in the source PDF
+    let quarterTurns: Int   // clockwise rotation applied to make the page upright
+    let lines: [OCRLine]    // boxes normalized to the upright page
 
-    var pages: [String] = []
+    var text: String { lines.map(\.text).joined(separator: "\n") }
+}
+
+func scanPages(of pdf: PDFDocument) throws -> [PageScan] {
+    var pages: [PageScan] = []
 
     for i in 0..<pdf.pageCount {
         guard let page = pdf.page(at: i),
               let cgImage = renderPage(page) else { continue }
 
         // Auto-rotate: detect the correct orientation per page (handles
-        // upside-down scans and landscape sheets), then OCR at that
-        // orientation with the high-accuracy recognizer.
-        let orientation = detectOrientation(cgImage: cgImage)
-        if orientation != .up {
-            let labels: [CGImagePropertyOrientation: String] =
-                [.right: "90° CW", .down: "180°", .left: "90° CCW"]
-            fputs("  page \(i + 1): rotated \(labels[orientation] ?? "?") — auto-correcting\n", stderr)
+        // upside-down scans and landscape sheets), then OCR the upright
+        // image with the high-accuracy recognizer.
+        let (turns, upright) = detectOrientation(cgImage: cgImage)
+        if turns != 0 {
+            let labels = [1: "90° CW", 2: "180°", 3: "90° CCW"]
+            fputs("  page \(i + 1): rotating \(labels[turns] ?? "?") to upright\n", stderr)
         }
 
-        let result = try recognizeText(cgImage: cgImage, orientation: orientation, level: .accurate)
-        if !result.text.isEmpty { pages.append(result.text) }
+        let result = try recognizeText(cgImage: upright, level: .accurate)
+        pages.append(PageScan(index: i, quarterTurns: turns, lines: result.lines))
     }
 
-    return pages.joined(separator: "\n\n---\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    return pages
 }
 
 // MARK: - AI analysis
@@ -338,6 +386,14 @@ func fallbackAnalysis(text: String, filename: String, reason: String) -> Documen
 
 // MARK: - Translation
 
+/// Hiragana, Katakana, CJK Unified Ideographs, or Hangul Syllables.
+func isCJK(_ s: Unicode.Scalar) -> Bool {
+    let v = s.value
+    return (0x3040...0x30FF).contains(v) ||      // Hiragana + Katakana
+           (0x4E00...0x9FFF).contains(v) ||      // CJK Unified
+           (0xAC00...0xD7AF).contains(v)         // Hangul
+}
+
 /// Detect the dominant language of the OCR'd text. Returns a BCP-47
 /// language code (e.g., "en", "ja", "de") or nil if the text is English
 /// or detection isn't confident enough to act on.
@@ -366,13 +422,7 @@ func detectLanguage(_ text: String) -> String? {
     var letterCount = 0
     for s in scalars {
         if s.properties.isAlphabetic { letterCount += 1 }
-        let v = s.value
-        // CJK Unified Ideographs, Hiragana, Katakana, Hangul Syllables
-        if (0x3040...0x30FF).contains(v) ||      // Hiragana + Katakana
-           (0x4E00...0x9FFF).contains(v) ||      // CJK Unified
-           (0xAC00...0xD7AF).contains(v) {       // Hangul
-            cjkCount += 1
-        }
+        if isCJK(s) { cjkCount += 1 }
     }
     let cjkRatio = letterCount > 0 ? Double(cjkCount) / Double(letterCount) : 0
     fputs("  language detect: \(letterCount) letters, \(cjkCount) CJK (\(String(format: "%.0f%%", cjkRatio * 100)))\n", stderr)
@@ -477,13 +527,14 @@ struct Output: Codable {
     let keywords: [String]
     let sourceLanguage: String?  // BCP-47, only set when non-English
     let translation: String?     // English translation, only set when non-English
+    let translatedPdf: String?   // English overlay PDF path, only set when one was written
 }
 
 // MARK: - Entry point
 
 let args = CommandLine.arguments
 guard args.count > 1 else {
-    fputs("Usage: process_scan <path-to-pdf>\n", stderr)
+    fputs("Usage: process_scan <path-to-pdf> [--translated-pdf <output.pdf>]\n", stderr)
     exit(1)
 }
 
@@ -491,27 +542,77 @@ let pdfPath = args[1]
 let pdfURL = URL(fileURLWithPath: pdfPath)
 let filename = pdfURL.lastPathComponent
 
-let sema = DispatchSemaphore(value: 0)
-var exitCode: Int32 = 0
+// Where to write an English overlay PDF if the document isn't in English.
+let translatedPDFPath: String? = {
+    guard let i = args.firstIndex(of: "--translated-pdf"), i + 1 < args.count else { return nil }
+    return args[i + 1]
+}()
 
-Task {
-    defer { sema.signal() }
+/// Translate non-English pages with Apple's on-device Translation framework,
+/// and write the English overlay PDF if asked to. Returns the English text,
+/// or nil if the language pair isn't installed or nothing translated.
+@MainActor
+func translatePages(_ pages: [PageScan], of pdf: PDFDocument, language: String) async
+    -> (text: String, pdfPath: String?)? {
+    guard let translator = await PageTranslator(sourceLanguage: language) else { return nil }
+
+    var translated: [TranslatedPage] = []
+    for scan in pages {
+        translated.append(await translator.translate(scan, in: pdf))
+    }
+    guard translated.contains(where: { $0.translatedBlockCount > 0 }) else { return nil }
+
+    let text = translated.map(\.englishText).filter { !$0.isEmpty }.joined(separator: "\n\n---\n\n")
+
+    var pdfPath: String?
+    if let out = translatedPDFPath {
+        do {
+            try writeTranslatedPDF(translated, from: pdf, to: URL(fileURLWithPath: out))
+            pdfPath = out
+        } catch {
+            fputs("[\(filename)] Could not write English PDF: \(error.localizedDescription)\n", stderr)
+        }
+    }
+    return (text, pdfPath)
+}
+
+@MainActor
+func run() async -> Int32 {
     do {
+        guard let pdf = PDFDocument(url: pdfURL) else {
+            throw NSError(domain: "ScanProcessor", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "Could not load PDF at \(pdfURL.path)"])
+        }
+
         fputs("[\(filename)] Extracting text via OCR...\n", stderr)
-        let text = try extractText(from: pdfURL)
+        let pages = try scanPages(of: pdf)
+        let text = pages.map(\.text).filter { !$0.isEmpty }
+            .joined(separator: "\n\n---\n\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Detect language. Anything other than English (or unknown) gets
         // translated. We do this before the analysis step so the translated
         // English text drives summarization — better titles + summaries.
         var sourceLang: String? = nil
         var translation: String? = nil
+        var translatedPDF: String? = nil
         var textForAnalysis = text
         if let lang = detectLanguage(text), lang != "en", !text.isEmpty {
             sourceLang = lang
             fputs("[\(filename)] Detected non-English content (\(lang)) — translating...\n", stderr)
-            if let translated = await translateToEnglish(text: text, sourceLanguage: lang) {
-                translation = translated
-                textForAnalysis = translated
+            // Prefer the Translation framework: it's a dedicated translator
+            // and works paragraph by paragraph, which is what lets us redraw
+            // the pages in English. Without the language pack installed,
+            // fall back to Foundation Models (text only, no PDF).
+            if let result = await translatePages(pages, of: pdf, language: lang) {
+                translation = result.text
+                translatedPDF = result.pdfPath
+            } else {
+                fputs("[\(filename)] Translation framework unavailable — translating text with Foundation Models.\n", stderr)
+                translation = await translateToEnglish(text: text, sourceLanguage: lang)
+            }
+            if let translation {
+                textForAnalysis = translation
             } else {
                 fputs("[\(filename)] Translation unavailable — analyzing original text.\n", stderr)
             }
@@ -535,17 +636,25 @@ Task {
             summary: analysis.summary,
             keywords: analysis.keywords,
             sourceLanguage: sourceLang,
-            translation: translation
+            translation: translation,
+            translatedPdf: translatedPDF
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = .prettyPrinted
         let json = try encoder.encode(output)
         print(String(data: json, encoding: .utf8)!)
+        return 0
     } catch {
         fputs("Error: \(error.localizedDescription)\n", stderr)
-        exitCode = 1
+        return 1
     }
 }
 
-sema.wait()
-exit(exitCode)
+// Run on the main actor and keep the main queue serviced (rather than
+// blocking it on a semaphore), so frameworks that call back on the main
+// thread can't deadlock us.
+Task { @MainActor in
+    let code = await run()
+    exit(code)
+}
+dispatchMain()

@@ -46,11 +46,16 @@ def applescript_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def create_note(title: str, body: str, pdf_path: str, folder: str) -> bool:
+def create_note(title: str, body: str, pdf_path: str, folder: str,
+                translated_pdf_path: str = "") -> bool:
     t = applescript_escape(title)
     b = applescript_escape(body)
     f = applescript_escape(folder)
     p = applescript_escape(pdf_path)
+    attach_translated = ""
+    if translated_pdf_path:
+        tp = applescript_escape(translated_pdf_path)
+        attach_translated = f'\n                make new attachment with data (POSIX file "{tp}")'
 
     # Note: Apple Notes' AppleScript attachment API has a long-standing bug
     # where attachments are sometimes registered twice (visible as duplicate
@@ -73,7 +78,7 @@ tell application "Notes"
         tell targetFolder
             set newNote to make new note with properties {{name:"{t}", body:"{b}"}}
             tell newNote
-                make new attachment with data (POSIX file "{p}")
+                make new attachment with data (POSIX file "{p}"){attach_translated}
             end tell
         end tell
     end tell
@@ -103,6 +108,8 @@ def main():
                         help="Optional English translation of the document body.")
     parser.add_argument("--source-lang", default="",
                         help="BCP-47 source language code (used in the translation header).")
+    parser.add_argument("--translated-pdf", default="",
+                        help="Optional English overlay PDF to attach after the original.")
     args = parser.parse_args()
 
     body = build_note_body(
@@ -118,6 +125,7 @@ def main():
         body=body,
         pdf_path=args.pdf,
         folder=args.folder,
+        translated_pdf_path=args.translated_pdf,
     )
 
     sys.exit(0 if success else 1)

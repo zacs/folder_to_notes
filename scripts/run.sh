@@ -122,11 +122,14 @@ while IFS= read -r -d '' pdf; do
 
     log "  Processing: $filename"
 
-    # Run Swift OCR + AI tool, capture JSON
-    tmpjson=$(mktemp)
-    if ! "$BIN" "$pdf" >"$tmpjson" 2>>"$LOG"; then
+    # Run Swift OCR + AI tool, capture JSON. For non-English scans it also
+    # writes an English overlay PDF into the work dir — outside the watched
+    # folder, so it's never picked up as a new scan.
+    work=$(mktemp -d)
+    tmpjson="${work}/output.json"
+    if ! "$BIN" "$pdf" --translated-pdf "${work}/${filename%.*} (English).pdf" >"$tmpjson" 2>>"$LOG"; then
         log "  ERROR: process_scan failed for $filename"
-        rm -f "$tmpjson"
+        rm -rf "$work"
         continue
     fi
 
@@ -136,11 +139,12 @@ while IFS= read -r -d '' pdf; do
     keywords=$(python3 -c "import sys,json; print(', '.join(json.load(open('$tmpjson'))['keywords']))")
     source_lang=$(python3 -c "import sys,json; print(json.load(open('$tmpjson')).get('sourceLanguage') or '')")
     translation=$(python3 -c "import sys,json; print(json.load(open('$tmpjson')).get('translation') or '')")
-    rm -f "$tmpjson"
+    translated_pdf=$(python3 -c "import sys,json; print(json.load(open('$tmpjson')).get('translatedPdf') or '')")
 
     log "  Title: $title"
     log "  Keywords: $keywords"
     [[ -n "$source_lang" ]] && log "  Source language: $source_lang (translation included)"
+    [[ -n "$translated_pdf" ]] && log "  English PDF: $(basename "$translated_pdf")"
 
     # Create Apple Note
     if python3 "$CREATE_NOTE" \
@@ -149,6 +153,7 @@ while IFS= read -r -d '' pdf; do
         --keywords "$keywords" \
         --source-lang "$source_lang" \
         --translation "$translation" \
+        --translated-pdf "$translated_pdf" \
         --pdf      "$pdf" \
         --folder   "$NOTES_FOLDER" 2>>"$LOG"; then
 
@@ -159,9 +164,15 @@ while IFS= read -r -d '' pdf; do
         else
             log "  WARN: Note created but could not move $filename to ImportComplete"
         fi
+        # Keep the English PDF next to the original.
+        if [[ -n "$translated_pdf" ]]; then
+            move_to_done "$translated_pdf" "$(basename "$translated_pdf")" \
+                || log "  WARN: could not move English PDF to ImportComplete"
+        fi
     else
         log "  ERROR: Failed to create note for $filename"
     fi
+    rm -rf "$work"
 
 # -H: follow the folder itself if it's a symlink. -iname: scanners often
 # write .PDF. Skip dotfiles (AppleDouble ._ files, sync temp files).
