@@ -41,8 +41,35 @@ bash install.sh
 
 The installer will:
 1. Ask for your Dropbox scanner folder path and target Notes folder name
+   (saved to `state/config`, which `scripts/run.sh` reads)
 2. Compile the Swift binary
 3. Install and load the launchd agent
+
+Then grant the permissions below — without them the agent runs but can't see
+your scans.
+
+---
+
+## Permissions
+
+launchd runs `scripts/run.sh` with a bare `/bin/bash` — no Terminal window
+involved — so macOS privacy controls apply to `/bin/bash` itself. On current
+macOS, Dropbox lives under `~/Library/CloudStorage` (managed by macOS's File
+Provider), and a background `bash` can't list it until you allow it. When
+that's the problem, the log says:
+
+```
+FATAL: Cannot list /Users/you/Dropbox/Scanner: ... Operation not permitted ...
+```
+
+To fix it, open System Settings → Privacy & Security → Full Disk Access, click
+**+**, press ⌘⇧G, enter `/bin/bash`, and turn it on. Note that Full Disk Access
+applies to every script launchd runs with `/bin/bash`, not just this one.
+
+If notes stop appearing, check the log for the `FATAL` line above.
+
+The first note created also asks to let `bash` control Notes (Privacy &
+Security → Automation).
 
 ---
 
@@ -88,6 +115,8 @@ Dropbox folder (local sync)
 │   └── com.user.folder-to-notes.plist  ← launchd template
 ├── bin/
 │   └── process_scan        ← compiled Swift binary (created by install.sh)
+├── state/
+│   └── config              ← Dropbox + Notes folder (written by install.sh)
 └── logs/
     ├── scanner.log
     └── scanner-error.log
@@ -107,9 +136,9 @@ reprocessing every PDF if you set this up on a second Mac.
 tail -f ~/.folder-to-notes/logs/scanner.log
 ```
 
-**Manually trigger a run:**
+**Manually trigger a run** (as launchd runs it, so permission problems show up):
 ```bash
-bash ~/.folder-to-notes/scripts/run.sh
+launchctl kickstart gui/$(id -u)/com.user.folder-to-notes
 ```
 
 **Test the Swift tool standalone:**
@@ -125,10 +154,10 @@ mv ~/Dropbox/Scanner/ImportComplete/filename.pdf ~/Dropbox/Scanner/
 ```
 
 **Change the Dropbox folder or Notes folder:**
-Edit the variables at the top of `scripts/run.sh` and reload the agent:
+Re-run the installer (or the bootstrap one-liner). It saves the new values to
+`state/config` and updates the launchd watch path:
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.user.folder-to-notes.plist
-launchctl load  ~/Library/LaunchAgents/com.user.folder-to-notes.plist
+bash ~/.folder-to-notes/install.sh
 ```
 
 ---
