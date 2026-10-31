@@ -66,7 +66,7 @@ SDK=$(xcrun --show-sdk-path)
 xcrun swiftc \
     -O \
     -sdk "$SDK" \
-    "$INSTALL_DIR/Sources/main.swift" \
+    "$INSTALL_DIR"/Sources/*.swift \
     -o "$INSTALL_DIR/bin/process_scan"
 
 echo "   ✓ Compiled: $INSTALL_DIR/bin/process_scan"
