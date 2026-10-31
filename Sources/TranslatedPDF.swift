@@ -19,7 +19,11 @@ struct TextBlock {
     var lineRects: [CGRect]
     var texts: [String]
 
-    var rect: CGRect { lineRects.dropFirst().reduce(lineRects[0]) { $0.union($1) } }
+    var rect: CGRect {
+        var r = lineRects[0]
+        for line in lineRects.dropFirst() { r = r.union(line) }
+        return r
+    }
 
     /// Median OCR line height — roughly the original font size.
     var lineHeight: CGFloat {
@@ -30,7 +34,8 @@ struct TextBlock {
     /// Japanese and Chinese wrap lines mid-sentence without a space;
     /// everything else wraps at spaces.
     func text(language: String) -> String {
-        texts.joined(separator: ["ja", "zh"].contains(language) ? "" : " ")
+        let separator = (language == "ja" || language == "zh") ? "" : " "
+        return texts.joined(separator: separator)
     }
 }
 
@@ -39,20 +44,29 @@ func uprightSize(of page: PDFPage, quarterTurns: Int) -> CGSize {
     return quarterTurns % 2 == 0 ? size : CGSize(width: size.height, height: size.width)
 }
 
+/// Reading order: top to bottom, then left to right.
+func readsBefore(_ a: CGRect, _ b: CGRect) -> Bool {
+    if a.maxY != b.maxY { return a.maxY > b.maxY }
+    return a.minX < b.minX
+}
+
 /// Group OCR lines into paragraphs, in reading order. Vision returns one
 /// observation per visual line; translating line by line splits sentences
 /// mid-way, so we join lines that continue the paragraph above them.
 func groupIntoBlocks(_ lines: [OCRLine], pageSize: CGSize) -> [TextBlock] {
-    let placed = lines
-        .map { line in
-            (text: line.text,
-             rect: CGRect(x: line.box.minX * pageSize.width,
+    // OCR boxes are normalized; scale them to page points.
+    var placed: [(text: String, rect: CGRect)] = []
+    for line in lines {
+        let rect = CGRect(x: line.box.minX * pageSize.width,
                           y: line.box.minY * pageSize.height,
                           width: line.box.width * pageSize.width,
-                          height: line.box.height * pageSize.height))
+                          height: line.box.height * pageSize.height)
+        let isBlank = line.text.trimmingCharacters(in: .whitespaces).isEmpty
+        if !isBlank && rect.height > 0 {
+            placed.append((text: line.text, rect: rect))
         }
-        .filter { !$0.text.trimmingCharacters(in: .whitespaces).isEmpty && $0.rect.height > 0 }
-        .sorted { $0.rect.maxY != $1.rect.maxY ? $0.rect.maxY > $1.rect.maxY : $0.rect.minX < $1.rect.minX }
+    }
+    placed.sort { a, b in readsBefore(a.rect, b.rect) }
 
     var blocks: [TextBlock] = []
     for line in placed {
@@ -77,9 +91,7 @@ func groupIntoBlocks(_ lines: [OCRLine], pageSize: CGSize) -> [TextBlock] {
         }
     }
 
-    return blocks.sorted {
-        $0.rect.maxY != $1.rect.maxY ? $0.rect.maxY > $1.rect.maxY : $0.rect.minX < $1.rect.minX
-    }
+    return blocks.sorted { a, b in readsBefore(a.rect, b.rect) }
 }
 
 /// Whether `next` continues the paragraph whose last line is `prev`:
@@ -243,9 +255,12 @@ private func drawTranslation(_ text: String, over block: TextBlock, in ctx: CGCo
     var ink = RGB.black
     if let sampled = bitmap?.colors(in: cover, pageSize: pageSize) {
         paper = sampled.paper
-        ink = abs(sampled.paper.luminance - sampled.ink.luminance) >= 0.3
-            ? sampled.ink
-            : (paper.luminance > 0.5 ? .black : .white)
+        let contrast: CGFloat = abs(sampled.paper.luminance - sampled.ink.luminance)
+        if contrast >= 0.3 {
+            ink = sampled.ink
+        } else if paper.luminance <= 0.5 {
+            ink = RGB.white
+        }
     }
 
     let maxFontSize = min(max(block.lineHeight * 0.85, minFontSize), 28)
@@ -327,7 +342,12 @@ struct RGB {
     static let black = RGB(r: 0, g: 0, b: 0)
     static let white = RGB(r: 1, g: 1, b: 1)
 
-    var luminance: CGFloat { 0.2126 * r + 0.7152 * g + 0.0722 * b }
+    var luminance: CGFloat {
+        let red: CGFloat = 0.2126 * r
+        let green: CGFloat = 0.7152 * g
+        let blue: CGFloat = 0.0722 * b
+        return red + green + blue
+    }
     var cgColor: CGColor { CGColor(srgbRed: r, green: g, blue: b, alpha: 1) }
 }
 
@@ -367,20 +387,24 @@ struct Bitmap {
         guard pageSize.width > 0, pageSize.height > 0 else { return nil }
         let sx = CGFloat(width) / pageSize.width
         let sy = CGFloat(height) / pageSize.height
-        let x0 = max(0, Int(rect.minX * sx)), x1 = min(width, Int(rect.maxX * sx))
-        let y0 = max(0, Int(rect.minY * sy)), y1 = min(height, Int(rect.maxY * sy))
+        let x0: Int = max(0, Int(rect.minX * sx))
+        let x1: Int = min(width, Int(rect.maxX * sx))
+        let y0: Int = max(0, Int(rect.minY * sy))
+        let y1: Int = min(height, Int(rect.maxY * sy))
         guard x1 > x0, y1 > y0 else { return nil }
 
         // Sample at most ~4000 pixels.
-        let step = max(1, Int((Double((x1 - x0) * (y1 - y0)) / 4000).squareRoot()))
+        let area = Double((x1 - x0) * (y1 - y0))
+        let step: Int = max(1, Int((area / 4000).squareRoot()))
         var samples: [RGB] = []
         for y in stride(from: y0, to: y1, by: step) {
             let row = height - 1 - y   // page y runs up; bitmap rows run down
             for x in stride(from: x0, to: x1, by: step) {
                 let i = (row * width + x) * 4
-                samples.append(RGB(r: CGFloat(pixels[i]) / 255,
-                                   g: CGFloat(pixels[i + 1]) / 255,
-                                   b: CGFloat(pixels[i + 2]) / 255))
+                let red: CGFloat = CGFloat(pixels[i]) / 255
+                let green: CGFloat = CGFloat(pixels[i + 1]) / 255
+                let blue: CGFloat = CGFloat(pixels[i + 2]) / 255
+                samples.append(RGB(r: red, g: green, b: blue))
             }
         }
         samples.sort { $0.luminance < $1.luminance }
@@ -391,9 +415,13 @@ struct Bitmap {
     }
 
     private func average(_ colors: ArraySlice<RGB>) -> RGB {
+        var sum = RGB(r: 0, g: 0, b: 0)
+        for c in colors {
+            sum.r += c.r
+            sum.g += c.g
+            sum.b += c.b
+        }
         let n = CGFloat(colors.count)
-        return RGB(r: colors.reduce(0) { $0 + $1.r } / n,
-                   g: colors.reduce(0) { $0 + $1.g } / n,
-                   b: colors.reduce(0) { $0 + $1.b } / n)
+        return RGB(r: sum.r / n, g: sum.g / n, b: sum.b / n)
     }
 }
