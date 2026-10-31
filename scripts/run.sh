@@ -5,27 +5,45 @@
 set -euo pipefail
 
 # ── Single-instance guard ────────────────────────────────────────────────────
-# launchd can fire WatchPaths events twice in rapid succession for a single
-# file change. Without this, two concurrent runs both try to process the same
-# PDFs and we create duplicate notes / attachments.
+# Keeps a manual run and a launchd-triggered run from processing the same
+# PDFs at the same time, which would create duplicate notes / attachments.
 # (macOS doesn't ship flock(1), so we use an atomic mkdir as a lock.)
 LOCK_DIR="/tmp/folder-to-notes.lock"
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    # Another instance is already handling this batch — exit silently.
-    exit 0
+    # Only back off if the owner is still alive. A run that was SIGKILLed
+    # can't clean up after itself, and a stale lock would otherwise make
+    # every later run exit silently until the next reboot.
+    lock_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null || true)
+    if [[ -n "$lock_pid" ]] && kill -0 "$lock_pid" 2>/dev/null; then
+        exit 0
+    fi
+    rm -rf "$LOCK_DIR"
+    mkdir "$LOCK_DIR" 2>/dev/null || exit 0
 fi
-trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+echo $$ > "$LOCK_DIR/pid"
+trap 'rm -rf "$LOCK_DIR"' EXIT
 
 # ── Configuration ────────────────────────────────────────────────────────────
-DROPBOX_FOLDER="/Users/zac/Dropbox/Scanner"
-NOTES_FOLDER="Inbox"       # Folder name inside Apple Notes / iCloud
-
 # Resolve BASE_DIR to the repo root (parent of this scripts/ folder),
 # regardless of where the project is installed.
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Folder paths come from state/config, written by install.sh. Re-run the
+# installer to change them (it also updates the launchd WatchPaths).
+SAVED_DROPBOX_PATH="${HOME}/Dropbox/Scanner"
+SAVED_NOTES_FOLDER="Scanned Documents"
+if [[ -f "${BASE_DIR}/state/config" ]]; then
+    # shellcheck disable=SC1091
+    source "${BASE_DIR}/state/config"
+fi
+DROPBOX_FOLDER="$SAVED_DROPBOX_PATH"
+NOTES_FOLDER="$SAVED_NOTES_FOLDER"   # Folder name inside Apple Notes / iCloud
+
 BIN="${BASE_DIR}/bin/process_scan"
 CREATE_NOTE="${BASE_DIR}/scripts/create_note.py"
 DONE_FOLDER="${DROPBOX_FOLDER}/ImportComplete"
+# Older versions recorded handled filenames here instead of moving the PDFs.
+LEGACY_PROCESSED="${BASE_DIR}/state/processed.txt"
 LOG="${BASE_DIR}/logs/scanner.log"
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -41,10 +59,35 @@ die() {
     exit 1
 }
 
+# Move a handled PDF into ImportComplete/ so it won't be picked up again.
+# The destination folder lives inside the watched Dropbox folder, so the
+# state survives moves between machines (Dropbox syncs the move) and
+# there's no local-only state file to lose.
+# If a same-named file already exists there, suffix with timestamp.
+move_to_done() {
+    local pdf="$1" filename="$2"
+    local dest="${DONE_FOLDER}/${filename}"
+    if [[ -e "$dest" ]]; then
+        local ts
+        ts=$(date '+%Y%m%d-%H%M%S')
+        dest="${DONE_FOLDER}/${filename%.*} (${ts}).${filename##*.}"
+    fi
+    mv "$pdf" "$dest"
+}
+
 # Sanity checks
 [[ -x "$BIN" ]]           || die "Swift binary not found at $BIN — run install.sh"
 [[ -f "$CREATE_NOTE" ]]   || die "create_note.py not found at $CREATE_NOTE"
 [[ -d "$DROPBOX_FOLDER" ]] || { log "Dropbox folder not found: $DROPBOX_FOLDER — skipping run"; exit 0; }
+
+# launchd runs this as a bare /bin/bash, so macOS privacy controls (TCC)
+# apply to bash itself. Without access to Dropbox (which lives under
+# ~/Library/CloudStorage), the -d check above still passes but listing the
+# folder fails with "Operation not permitted". Say so instead of quietly
+# reporting 0 PDFs.
+if ! list_err=$(ls "$DROPBOX_FOLDER" 2>&1 >/dev/null); then
+    die "Cannot list ${DROPBOX_FOLDER}: ${list_err} — give /bin/bash access to it (see README → Permissions)"
+fi
 
 mkdir -p "$DONE_FOLDER"
 
@@ -59,6 +102,14 @@ processed=0
 while IFS= read -r -d '' pdf; do
     filename=$(basename "$pdf")
     found=$((found + 1))
+
+    # Imported by an older version, which left the PDF in place — move it
+    # aside without creating a duplicate note.
+    if [[ -f "$LEGACY_PROCESSED" ]] && grep -qxF "$filename" "$LEGACY_PROCESSED"; then
+        log "  Already imported (state/processed.txt): $filename — moving to ImportComplete"
+        move_to_done "$pdf" "$filename" || log "  WARN: could not move $filename to ImportComplete"
+        continue
+    fi
 
     # Wait for file size to stabilise (still syncing guard)
     size1=$(stat -f%z "$pdf" 2>/dev/null || echo 0)
@@ -103,18 +154,7 @@ while IFS= read -r -d '' pdf; do
 
         log "  ✓ Note created: $title"
 
-        # Move processed PDF into ImportComplete/ so it won't be picked up
-        # again. The destination folder lives inside the watched Dropbox
-        # folder, so the state survives moves between machines (Dropbox
-        # syncs the move) and there's no local-only state file to lose.
-        # If a same-named file already exists there, suffix with timestamp.
-        dest="${DONE_FOLDER}/${filename}"
-        if [[ -e "$dest" ]]; then
-            ts=$(date '+%Y%m%d-%H%M%S')
-            base="${filename%.pdf}"
-            dest="${DONE_FOLDER}/${base} (${ts}).pdf"
-        fi
-        if mv "$pdf" "$dest"; then
+        if move_to_done "$pdf" "$filename"; then
             processed=$((processed + 1))
         else
             log "  WARN: Note created but could not move $filename to ImportComplete"
@@ -123,6 +163,8 @@ while IFS= read -r -d '' pdf; do
         log "  ERROR: Failed to create note for $filename"
     fi
 
-done < <(find "$DROPBOX_FOLDER" -maxdepth 1 -name "*.pdf" -print0 2>/dev/null)
+# -H: follow the folder itself if it's a symlink. -iname: scanners often
+# write .PDF. Skip dotfiles (AppleDouble ._ files, sync temp files).
+done < <(find -H "$DROPBOX_FOLDER" -maxdepth 1 -type f -iname "*.pdf" ! -name ".*" -print0 2>>"$LOG")
 
 log "Done — found $found PDF(s), processed $processed new."

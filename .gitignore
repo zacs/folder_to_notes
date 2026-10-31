@@ -1,3 +1,4 @@
 /state/*
 /logs/*
+/bin/*
 .DS_Store

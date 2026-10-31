@@ -48,21 +48,14 @@ mkdir -p "$INSTALL_DIR"/{bin,state,logs}
 # Processed PDFs are moved here — this is our durable, cross-machine state.
 mkdir -p "$DROPBOX_PATH/ImportComplete" 2>/dev/null || true
 
-# ── Persist answers for next time ────────────────────────────────────────────
+# ── Persist answers ──────────────────────────────────────────────────────────
+# run.sh reads these at runtime; they're also the defaults on the next install run.
 cat > "$CONFIG_FILE" <<EOF
-# Saved by install.sh — used as defaults on the next install run.
+# Saved by install.sh — read by scripts/run.sh. Re-run install.sh to change.
 SAVED_DROPBOX_PATH="${DROPBOX_PATH}"
 SAVED_NOTES_FOLDER="${NOTES_FOLDER}"
 EOF
 
-# ── Update run.sh with Notes folder ─────────────────────────────────────────
-echo "→ Configuring run.sh..."
-sed -i '' \
-    "s|NOTES_FOLDER=\"Scanned Documents\"|NOTES_FOLDER=\"${NOTES_FOLDER}\"|" \
-    "$INSTALL_DIR/scripts/run.sh"
-sed -i '' \
-    "s|DROPBOX_FOLDER=\"\${HOME}/Dropbox/Scanner\"|DROPBOX_FOLDER=\"${DROPBOX_PATH}\"|" \
-    "$INSTALL_DIR/scripts/run.sh"
 chmod +x "$INSTALL_DIR/scripts/run.sh"
 chmod +x "$INSTALL_DIR/scripts/create_note.py"
 
